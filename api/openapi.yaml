@@ -1,0 +1,221 @@
+openapi: 3.0.3
+info:
+  title: GophKeeper API
+  version: 1.0.0
+  description: >-
+    HTTPS API for owner-scoped encrypted records. All byte arrays use base64.
+    Secrets are encrypted by clients; the server never receives vault passwords.
+    Sessions expire after 24 hours. Snapshot quota is 64 MiB ciphertext.
+servers:
+  - url: https://localhost:8443
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Process readiness
+      security: []
+      responses:
+        '200':
+          description: Process is serving requests (does not probe the database)
+  /v1/register:
+    post:
+      summary: Register an account and issue a session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Registration'
+      responses:
+        '201':
+          $ref: '#/components/responses/Session'
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: Login already exists
+        '415':
+          $ref: '#/components/responses/Error'
+        '429':
+          description: Authentication rate or concurrency limit; Retry-After may be present
+        '500':
+          $ref: '#/components/responses/Error'
+  /v1/login:
+    post:
+      summary: Authenticate and obtain immutable vault parameters
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          $ref: '#/components/responses/Session'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          description: Invalid credentials
+        '415':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /v1/logout:
+    post:
+      summary: Revoke the current session token
+      responses:
+        '200':
+          description: Session revoked
+        '401':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /v1/records:
+    get:
+      summary: Get the complete current owner's snapshot, including tombstones
+      responses:
+        '200':
+          description: Records ordered by ID, at most 1000 including tombstones
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 1000
+                items:
+                  $ref: '#/components/schemas/Record'
+        '401':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+    post:
+      summary: Atomically apply or replay a mutation
+      description: >-
+        base is the expected revision (0 for creation). Request record.revision must be 0.
+        The same operation ID and payload replay the original result. Reusing an ID
+        for another payload or writing a stale base returns 409. A tombstone cannot
+        be changed. User identity comes exclusively from the bearer token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Mutation'
+      responses:
+        '200':
+          description: Applied or replayed, with server-assigned revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Record'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: Stale revision, immutable tombstone or mismatched operation replay
+        '415':
+          $ref: '#/components/responses/Error'
+        '422':
+          description: Record count or encrypted data quota exceeded
+        '500':
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Opaque 64-character hexadecimal session token, not JWT
+  responses:
+    Session:
+      description: Session token and client vault parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Session'
+    Error:
+      description: Request failed; error message contains no secret values
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+  schemas:
+    Credentials:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          pattern: '^[a-zA-Z0-9_.-]{3,64}$'
+        password:
+          type: string
+          format: password
+          description: Authentication password, 12–72 UTF-8 bytes; not the vault password
+    Registration:
+      allOf:
+        - $ref: '#/components/schemas/Credentials'
+        - type: object
+          required: [salt, key_check]
+          properties:
+            salt:
+              type: string
+              format: byte
+              description: 16 random bytes, generated by the client
+            key_check:
+              type: string
+              format: byte
+              description: Encrypted vault check, 29–256 bytes
+    Session:
+      type: object
+      required: [token, login, salt, key_check]
+      properties:
+        token:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        login:
+          type: string
+        salt:
+          type: string
+          format: byte
+        key_check:
+          type: string
+          format: byte
+    Record:
+      type: object
+      required: [id, revision, deleted]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 0 in a mutation, positive in a server response
+        deleted:
+          type: boolean
+        data:
+          type: string
+          format: byte
+          description: 29 bytes to 12 MiB ciphertext; absent for deletion
+    Mutation:
+      type: object
+      required: [operation, base, record]
+      properties:
+        operation:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+        base:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 4611686018427387903
+        record:
+          $ref: '#/components/schemas/Record'
