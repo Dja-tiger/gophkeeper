@@ -96,7 +96,15 @@ func (r *Remote) call(ctx context.Context, method, path string, input, output an
 	if output == nil {
 		return nil
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 100<<20)).Decode(output)
+	reader := &io.LimitedReader{R: resp.Body, N: (100 << 20) + 1}
+	decoder := json.NewDecoder(reader)
+	if e = decoder.Decode(output); e != nil {
+		return errors.New("invalid JSON response")
+	}
+	if e = decoder.Decode(&struct{}{}); e != io.EOF || reader.N == 0 {
+		return errors.New("response must contain exactly one JSON value within the size limit")
+	}
+	return nil
 }
 
 // Register creates a user and returns its first session.
@@ -122,6 +130,9 @@ func (r *Remote) Logout(ctx context.Context) error {
 func (r *Remote) List(ctx context.Context) ([]model.Record, error) {
 	var records []model.Record
 	e := r.call(ctx, "GET", "/v1/records", nil, &records)
+	if e == nil && records == nil {
+		e = errors.New("snapshot must be a JSON array")
+	}
 	return records, e
 }
 

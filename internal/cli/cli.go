@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,8 @@ Auth: --server https://host:8443 --login NAME --auth-password-file FILE --vault-
 Records: --input JSON_FILE --id ID --file BINARY_FILE --output NEW_FILE --offline
          add/edit accept a full Secret JSON object; binary contents can come from --file.
 Conflict: resolve --id ID --keep local|remote, then sync.
---offline uses the encrypted local cache; otherwise record commands synchronize first/after writes.
+--offline uses the encrypted local cache (add/edit/get/list/delete/status only).
+Online reads synchronize first; writes use the cached revision and synchronize after saving.
 `
 
 type options struct {
@@ -80,6 +82,13 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if f.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
+	if o.offline {
+		switch command {
+		case "add", "edit", "get", "list", "delete", "status":
+		default:
+			return errors.New("--offline is only supported for record commands and status")
+		}
+	}
 	unlock, e := client.Lock(o.cache)
 	if e != nil {
 		return e
@@ -100,11 +109,14 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		sort.Strings(ids)
 		return json.NewEncoder(out).Encode(map[string]any{"login": c.Session.Login, "server": c.Server, "pending": ids, "records": len(c.Records)})
 	}
-	r, e := remote(c.Server, o)
-	if e != nil {
-		return e
+	var r *client.Remote
+	if !o.offline {
+		r, e = remote(c.Server, o)
+		if e != nil {
+			return e
+		}
+		r.Token = c.Session.Token
 	}
-	r.Token = c.Session.Token
 	syncSave := func() error {
 		syncErr := c.Sync(ctx, r)
 		saveErr := c.Save(o.cache)
@@ -125,11 +137,6 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		return c.Save(o.cache)
 	}
 	if command == "delete" {
-		if !o.offline {
-			if e = syncSave(); e != nil {
-				return e
-			}
-		}
 		if e = c.Delete(o.id); e != nil {
 			return e
 		}
@@ -156,7 +163,9 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 		return c.Save(o.cache)
 	}
-	if !o.offline {
+	// Preserve the revision the user read when staging edits; a newer server
+	// revision must produce a conflict instead of silently replacing remote work.
+	if !o.offline && (command == "get" || command == "list") {
 		if e = syncSave(); e != nil {
 			return e
 		}
@@ -293,12 +302,17 @@ func authenticate(ctx context.Context, command string, o options, out, errOut io
 	if e != nil {
 		return e
 	}
+	r.Token = session.Token
+	if session.Login != o.login || (existing != nil &&
+		(!bytes.Equal(existing.Session.Salt, session.Salt) || !bytes.Equal(existing.Session.KeyCheck, session.KeyCheck))) {
+		_ = r.Logout(ctx)
+		return errors.New("server returned a different account or changed vault parameters; existing cache preserved, use a separate --cache path")
+	}
 	c := client.NewCache(r.URL, session)
 	if existing != nil {
 		c = existing
 		c.Session = session
 	}
-	r.Token = session.Token
 	key, e := c.Unlock(password)
 	if e != nil {
 		_ = r.Logout(ctx)

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,6 +97,7 @@ func (c *Cache) Unlock(password string) ([]byte, error) {
 	}
 	p, e := vault.Open(key, c.Session.KeyCheck, "gophkeeper/v1/check/"+c.Session.Login)
 	if e != nil || string(p) != "gophkeeper-vault-v1" {
+		clear(key)
 		return nil, errors.New("wrong vault password or damaged key check")
 	}
 	return key, nil
@@ -108,6 +110,7 @@ func VaultParameters(login, password string) ([]byte, []byte, error) {
 	if e != nil {
 		return nil, nil, e
 	}
+	defer clear(key)
 	check, e := vault.Seal(key, []byte("gophkeeper-vault-v1"), "gophkeeper/v1/check/"+login)
 	return salt, check, e
 }
@@ -207,9 +210,13 @@ func (c *Cache) Sync(ctx context.Context, r Transport) error {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		record, e := r.Apply(ctx, c.Pending[id])
+		m := c.Pending[id]
+		record, e := r.Apply(ctx, m)
 		if e != nil {
 			return fmt.Errorf("sync %s: %w", id, e)
+		}
+		if record.ID != id || record.Revision != m.Base+1 || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) {
+			return fmt.Errorf("sync %s: invalid mutation acknowledgement; change remains pending", id)
 		}
 		c.Records[id] = record
 		delete(c.Pending, id)
@@ -218,26 +225,44 @@ func (c *Cache) Sync(ctx context.Context, r Transport) error {
 	if e != nil {
 		return e
 	}
-	if len(records) > model.MaxRecords {
-		return errors.New("snapshot exceeds record limit")
-	}
-	next := map[string]model.Record{}
-	total := 0
-	for _, record := range records {
-		if !model.ValidID(record.ID) || record.Revision < 1 {
-			return errors.New("invalid snapshot record")
-		}
-		if _, exists := next[record.ID]; exists {
-			return errors.New("duplicate snapshot ID")
-		}
-		total += len(record.Data)
-		if total > model.MaxVaultData {
-			return errors.New("snapshot exceeds data quota")
-		}
-		next[record.ID] = record
+	next, e := validateSnapshot(records)
+	if e != nil {
+		return e
 	}
 	c.Records = next
 	return nil
+}
+
+func validateSnapshot(records []model.Record) (map[string]model.Record, error) {
+	if records == nil {
+		return nil, errors.New("snapshot must be a JSON array")
+	}
+	if len(records) > model.MaxRecords {
+		return nil, errors.New("snapshot exceeds record limit")
+	}
+	next := make(map[string]model.Record, len(records))
+	total := 0
+	for _, record := range records {
+		if !model.ValidID(record.ID) || record.Revision < 1 || record.Revision > 1<<62 {
+			return nil, errors.New("invalid snapshot record")
+		}
+		if record.Deleted {
+			if record.Revision < 2 || len(record.Data) != 0 {
+				return nil, errors.New("invalid snapshot tombstone")
+			}
+		} else if len(record.Data) < 29 || len(record.Data) > model.MaxData {
+			return nil, errors.New("invalid snapshot encrypted data size")
+		}
+		if _, exists := next[record.ID]; exists {
+			return nil, errors.New("duplicate snapshot ID")
+		}
+		total += len(record.Data)
+		if total > model.MaxVaultData {
+			return nil, errors.New("snapshot exceeds data quota")
+		}
+		next[record.ID] = record
+	}
+	return next, nil
 }
 
 // Resolve explicitly discards a pending change in favor of the server, or rebases it on the remote revision.
@@ -254,15 +279,11 @@ func (c *Cache) Resolve(ctx context.Context, r Transport, key []byte, id, choice
 	if e != nil {
 		return e
 	}
-	var remote model.Record
-	found := false
-	for _, v := range records {
-		if v.ID == id {
-			remote = v
-			found = true
-			break
-		}
+	next, e := validateSnapshot(records)
+	if e != nil {
+		return e
 	}
+	remote, found := next[id]
 	if choice == "remote" {
 		delete(c.Pending, id)
 		if found {
