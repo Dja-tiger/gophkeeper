@@ -121,9 +121,14 @@ func (r *Remote) Login(ctx context.Context, c model.Credentials) (model.Session,
 	return s, e
 }
 
-// Logout revokes the current bearer token.
+// Logout revokes the current bearer token. An already invalid or expired session is considered logged out.
 func (r *Remote) Logout(ctx context.Context) error {
-	return r.call(ctx, "POST", "/v1/logout", nil, nil)
+	e := r.call(ctx, "POST", "/v1/logout", nil, nil)
+	var apiErr *Error
+	if errors.As(e, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+		return nil
+	}
+	return e
 }
 
 // List downloads a complete owner-scoped snapshot, including tombstones.

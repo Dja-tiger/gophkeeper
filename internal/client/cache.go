@@ -39,10 +39,36 @@ func Load(path string) (*Cache, error) {
 	if e = json.Unmarshal(b, &c); e != nil {
 		return nil, e
 	}
-	if c.Version != 1 || c.Server == "" || !model.ValidLogin(c.Session.Login) || len(c.Session.Salt) != 16 || c.Records == nil || c.Pending == nil {
-		return nil, errors.New("invalid cache format")
+	if e = c.validate(); e != nil {
+		return nil, e
 	}
 	return &c, nil
+}
+
+func (c *Cache) validate() error {
+	if c.Version != 1 || c.Server == "" || !model.ValidLogin(c.Session.Login) || len(c.Session.Salt) != 16 || len(c.Session.KeyCheck) < 29 || len(c.Session.KeyCheck) > 256 || c.Records == nil || c.Pending == nil {
+		return errors.New("invalid cache format")
+	}
+	for id, record := range c.Records {
+		if !model.ValidID(id) || record.ID != id || record.Revision < 0 || record.Revision > 1<<62 {
+			return errors.New("invalid cache record identity or revision")
+		}
+		if record.Deleted && len(record.Data) != 0 || !record.Deleted && (len(record.Data) < 29 || len(record.Data) > model.MaxData) {
+			return errors.New("invalid cache record data")
+		}
+		if _, pending := c.Pending[id]; !pending && (record.Revision == 0 || record.Deleted && record.Revision < 2) {
+			return errors.New("cache record is missing its pending operation")
+		}
+	}
+	operations := make(map[string]bool, len(c.Pending))
+	for id, m := range c.Pending {
+		record, exists := c.Records[id]
+		if m.Validate() != nil || id != m.Record.ID || !exists || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) || operations[m.Operation] {
+			return errors.New("cache pending operation does not match its record")
+		}
+		operations[m.Operation] = true
+	}
+	return nil
 }
 
 // Save writes through a private temporary file and atomically replaces the cache.
@@ -129,11 +155,10 @@ func (c *Cache) Read(key []byte, id string) (model.Secret, error) {
 		return model.Secret{}, e
 	}
 	var s model.Secret
-	e = json.Unmarshal(b, &s)
-	if e == nil {
-		e = s.Validate()
+	if e = json.Unmarshal(b, &s); e != nil {
+		return model.Secret{}, errors.New("invalid decrypted secret JSON")
 	}
-	return s, e
+	return s, s.Validate()
 }
 
 // Put creates (empty id) or replaces a record and queues its encrypted mutation.
@@ -201,14 +226,21 @@ type Transport interface {
 	Apply(context.Context, model.Mutation) (model.Record, error)
 }
 
-// Sync pushes queued operations in deterministic order, then pulls a full snapshot.
+// Sync pushes deletions first to free data quota, then other operations, ordered by ID within each group.
+// It pulls a full snapshot once every pending operation has been acknowledged.
 // On failure, unsent and ambiguous writes remain pending; operation IDs make retries safe.
 func (c *Cache) Sync(ctx context.Context, r Transport) error {
 	ids := make([]string, 0, len(c.Pending))
 	for id := range c.Pending {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := c.Pending[ids[i]].Record.Deleted, c.Pending[ids[j]].Record.Deleted
+		if a != b {
+			return a
+		}
+		return ids[i] < ids[j]
+	})
 	for _, id := range ids {
 		m := c.Pending[id]
 		record, e := r.Apply(ctx, m)

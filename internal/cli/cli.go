@@ -213,7 +213,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		decoder := json.NewDecoder(strings.NewReader(string(b)))
 		decoder.DisallowUnknownFields()
 		if e = decoder.Decode(&s); e != nil {
-			return e
+			return errors.New("invalid secret JSON: check syntax, field names and value types")
 		}
 		if e = decoder.Decode(&struct{}{}); e != io.EOF {
 			return errors.New("one secret JSON object required")
