@@ -97,4 +97,3 @@ GOPHKEEPER_TEST_DATABASE_URL='postgres://USER:PASS@localhost:5432/DISPOSABLE_DB?
 - [Безопасность](docs/security.md)
 - [Разработка и инструкции проекта](docs/development.md)
 - [OpenAPI](api/openapi.yaml)
-- [Происхождение кода](NOTICE.md)
