@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +24,7 @@ func TestStaleCLIWritePreservesConcurrentEdit(t *testing.T) {
 	for _, command := range []string{"edit", "delete"} {
 		t.Run(command, func(t *testing.T) {
 			ctx := context.Background()
-			server := httptest.NewServer(api.New(testutil.NewDB()))
+			server := httptest.NewServer(api.New(testutil.NewDB(), slog.Default()))
 			defer server.Close()
 			r, err := client.NewRemote(server.URL, true, nil)
 			if err != nil {

@@ -4,6 +4,8 @@ package model
 import (
 	"errors"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 // MaxData is the largest encrypted record accepted by the service (12 MiB).
@@ -87,12 +89,14 @@ func (s Secret) Validate() error {
 	return nil
 }
 
-// Record is opaque encrypted data with an owner-local revision and a deletion marker.
+// Record contains encrypted data, optional public labels, an owner-local revision and a deletion marker.
 type Record struct {
 	ID       string `json:"id"`
 	Revision int64  `json:"revision"`
 	Deleted  bool   `json:"deleted"`
 	Data     []byte `json:"data,omitempty"`
+	// Labels are optional public search tags, visible to the server; never put secrets here.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // Mutation carries an idempotency key and the expected revision (zero for creation).
@@ -107,8 +111,11 @@ func (m Mutation) Validate() error {
 	if !ValidID(m.Operation) || !ValidID(m.Record.ID) || m.Base < 0 || m.Base >= 1<<62 || m.Record.Revision != 0 {
 		return errors.New("invalid mutation identifier or revision")
 	}
+	if err := ValidateLabels(m.Record.Labels); err != nil {
+		return err
+	}
 	if m.Record.Deleted {
-		if len(m.Record.Data) != 0 || m.Base == 0 {
+		if len(m.Record.Data) != 0 || len(m.Record.Labels) != 0 || m.Base == 0 {
 			return errors.New("deletion requires an existing record and no data")
 		}
 	} else if len(m.Record.Data) < 29 || len(m.Record.Data) > MaxData {
@@ -131,4 +138,22 @@ type Session struct {
 	Login    string `json:"login"`
 	Salt     []byte `json:"salt"`
 	KeyCheck []byte `json:"key_check"`
+}
+
+// ValidateLabels checks at most 16 unique public labels of 1–64 UTF-8 bytes, without surrounding whitespace.
+func ValidateLabels(labels []string) error {
+	if len(labels) > 16 {
+		return errors.New("at most 16 public labels allowed")
+	}
+	seen := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		if label == "" || len(label) > 64 || !utf8.ValidString(label) || strings.TrimSpace(label) != label {
+			return errors.New("public labels must be 1–64 UTF-8 bytes without surrounding whitespace")
+		}
+		if seen[label] {
+			return errors.New("duplicate public label")
+		}
+		seen[label] = true
+	}
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"sync"
@@ -43,7 +44,7 @@ func TestPostgresLifecycleAndConcurrentWrites(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	server := httptest.NewTLSServer(api.New(db))
+	server := httptest.NewTLSServer(api.New(db, slog.Default()))
 	defer server.Close()
 	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
 	r, e := client.NewRemote(server.URL, false, ca)

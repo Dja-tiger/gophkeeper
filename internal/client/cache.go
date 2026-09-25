@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/Dja-tiger/gophkeeper/internal/model"
@@ -46,14 +47,35 @@ func Load(path string) (*Cache, error) {
 }
 
 func (c *Cache) validate() error {
-	if c.Version != 1 || c.Server == "" || !model.ValidLogin(c.Session.Login) || len(c.Session.Salt) != 16 || len(c.Session.KeyCheck) < 29 || len(c.Session.KeyCheck) > 256 || c.Records == nil || c.Pending == nil {
-		return errors.New("invalid cache format")
+	if c.Version != 1 {
+		return errors.New("unsupported cache version")
+	}
+	if c.Server == "" {
+		return errors.New("cache server is missing")
+	}
+	if !model.ValidLogin(c.Session.Login) {
+		return errors.New("invalid cache login")
+	}
+	if len(c.Session.Salt) != 16 {
+		return errors.New("cache salt must be 16 bytes")
+	}
+	if len(c.Session.KeyCheck) < 29 || len(c.Session.KeyCheck) > 256 {
+		return errors.New("cache key check must be 29–256 bytes")
+	}
+	if c.Records == nil {
+		return errors.New("cache records are missing")
+	}
+	if c.Pending == nil {
+		return errors.New("cache pending operations are missing")
 	}
 	for id, record := range c.Records {
+		if e := model.ValidateLabels(record.Labels); e != nil {
+			return e
+		}
 		if !model.ValidID(id) || record.ID != id || record.Revision < 0 || record.Revision > 1<<62 {
 			return errors.New("invalid cache record identity or revision")
 		}
-		if record.Deleted && len(record.Data) != 0 || !record.Deleted && (len(record.Data) < 29 || len(record.Data) > model.MaxData) {
+		if record.Deleted && (len(record.Data) != 0 || len(record.Labels) != 0) || !record.Deleted && (len(record.Data) < 29 || len(record.Data) > model.MaxData) {
 			return errors.New("invalid cache record data")
 		}
 		if _, pending := c.Pending[id]; !pending && (record.Revision == 0 || record.Deleted && record.Revision < 2) {
@@ -63,7 +85,7 @@ func (c *Cache) validate() error {
 	operations := make(map[string]bool, len(c.Pending))
 	for id, m := range c.Pending {
 		record, exists := c.Records[id]
-		if m.Validate() != nil || id != m.Record.ID || !exists || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) || operations[m.Operation] {
+		if m.Validate() != nil || id != m.Record.ID || !exists || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) || !slices.Equal(record.Labels, m.Record.Labels) || operations[m.Operation] {
 			return errors.New("cache pending operation does not match its record")
 		}
 		operations[m.Operation] = true
@@ -164,6 +186,14 @@ func (c *Cache) Read(key []byte, id string) (model.Secret, error) {
 // Put creates (empty id) or replaces a record and queues its encrypted mutation.
 // Sync pending work before editing that record again, preserving retry idempotency after network failure.
 func (c *Cache) Put(key []byte, id string, s model.Secret) (string, error) {
+	return c.PutWithLabels(key, id, s, c.Records[id].Labels)
+}
+
+// PutWithLabels creates or replaces a secret and its public labels. Empty labels clear existing tags.
+func (c *Cache) PutWithLabels(key []byte, id string, s model.Secret, labels []string) (string, error) {
+	if e := model.ValidateLabels(labels); e != nil {
+		return "", e
+	}
 	if e := s.Validate(); e != nil {
 		return "", e
 	}
@@ -195,7 +225,7 @@ func (c *Cache) Put(key []byte, id string, s model.Secret) (string, error) {
 	if len(encrypted) > model.MaxData {
 		return "", errors.New("record exceeds encrypted size limit")
 	}
-	m := model.Mutation{Operation: vault.ID(), Base: old.Revision, Record: model.Record{ID: id, Data: encrypted}}
+	m := model.Mutation{Operation: vault.ID(), Base: old.Revision, Record: model.Record{ID: id, Data: encrypted, Labels: append([]string(nil), labels...)}}
 	c.Pending[id] = m
 	r := m.Record
 	r.Revision = old.Revision
@@ -247,7 +277,7 @@ func (c *Cache) Sync(ctx context.Context, r Transport) error {
 		if e != nil {
 			return fmt.Errorf("sync %s: %w", id, e)
 		}
-		if record.ID != id || record.Revision != m.Base+1 || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) {
+		if record.ID != id || record.Revision != m.Base+1 || record.Deleted != m.Record.Deleted || !bytes.Equal(record.Data, m.Record.Data) || !slices.Equal(record.Labels, m.Record.Labels) {
 			return fmt.Errorf("sync %s: invalid mutation acknowledgement; change remains pending", id)
 		}
 		c.Records[id] = record
@@ -275,11 +305,14 @@ func validateSnapshot(records []model.Record) (map[string]model.Record, error) {
 	next := make(map[string]model.Record, len(records))
 	total := 0
 	for _, record := range records {
+		if e := model.ValidateLabels(record.Labels); e != nil {
+			return nil, e
+		}
 		if !model.ValidID(record.ID) || record.Revision < 1 || record.Revision > 1<<62 {
 			return nil, errors.New("invalid snapshot record")
 		}
 		if record.Deleted {
-			if record.Revision < 2 || len(record.Data) != 0 {
+			if record.Revision < 2 || len(record.Data) != 0 || len(record.Labels) != 0 {
 				return nil, errors.New("invalid snapshot tombstone")
 			}
 		} else if len(record.Data) < 29 || len(record.Data) > model.MaxData {
@@ -337,7 +370,7 @@ func (c *Cache) Resolve(ctx context.Context, r Transport, key []byte, id, choice
 		}
 		delete(c.Pending, id)
 		c.Records[id] = remote
-		_, e = c.Put(key, "", secret)
+		_, e = c.PutWithLabels(key, "", secret, m.Record.Labels)
 		return e
 	}
 	if !found && m.Record.Deleted {

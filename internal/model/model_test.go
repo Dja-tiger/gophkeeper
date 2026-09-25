@@ -41,3 +41,18 @@ func TestMutationValidation(t *testing.T) {
 		t.Fatal("identifier rules")
 	}
 }
+
+func TestPublicLabelValidation(t *testing.T) {
+	for _, labels := range [][]string{{""}, {" work"}, {"work", "work"}, {strings.Repeat("x", 65)}, {string([]byte{0xff})}, make([]string, 17)} {
+		if err := ValidateLabels(labels); err == nil {
+			t.Fatal("invalid labels accepted")
+		}
+	}
+	if err := ValidateLabels([]string{"work", "личное"}); err != nil {
+		t.Fatal(err)
+	}
+	m := Mutation{Operation: strings.Repeat("a", 32), Base: 1, Record: Record{ID: strings.Repeat("b", 32), Deleted: true, Labels: []string{"work"}}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("tombstone kept public labels")
+	}
+}

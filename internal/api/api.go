@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 // Server routes requests to persistence and limits concurrent expensive password checks.
 type Server struct {
 	db        store.Store
+	logger    *slog.Logger
 	authSlots chan struct{}
 	mu        sync.Mutex
 	attempts  map[string]attempt
@@ -32,9 +34,13 @@ type attempt struct {
 	reset time.Time
 }
 
-// New builds an HTTP handler. The caller is responsible for TLS and transport timeouts.
-func New(db store.Store) http.Handler {
-	s := &Server{db: db, authSlots: make(chan struct{}, 4), attempts: map[string]attempt{}}
+// New builds an HTTP handler with an explicit error logger. A nil logger uses slog.Default.
+// The caller is responsible for TLS and transport timeouts.
+func New(db store.Store, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s := &Server{db: db, logger: logger, authSlots: make(chan struct{}, 4), attempts: map[string]attempt{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { write(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /v1/register", s.register)
@@ -57,6 +63,10 @@ func write(w http.ResponseWriter, status int, v any) {
 }
 func fail(w http.ResponseWriter, status int, message string) {
 	write(w, status, map[string]string{"error": message})
+}
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, message string, err error) {
+	s.logger.ErrorContext(r.Context(), message, "method", r.Method, "path", r.URL.Path, "error", err)
+	fail(w, http.StatusInternalServerError, message)
 }
 func decode(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/json" {
@@ -125,7 +135,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	defer func() { <-s.authSlots }()
 	hash, e := bcrypt.GenerateFromPassword([]byte(c.Password), bcrypt.DefaultCost)
 	if e != nil {
-		fail(w, 500, "authentication failed")
+		s.internalError(w, r, "authentication failed", e)
 		return
 	}
 	u := store.User{Login: c.Login, Hash: hash, Salt: c.Salt, KeyCheck: c.KeyCheck}
@@ -133,7 +143,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, model.ErrExists) {
 			fail(w, 409, "login already registered")
 		} else {
-			fail(w, 500, "registration failed")
+			s.internalError(w, r, "registration failed", e)
 		}
 		return
 	}
@@ -164,7 +174,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, model.ErrNotFound) {
 			fail(w, 401, "invalid credentials")
 		} else {
-			fail(w, 500, "authentication unavailable")
+			s.internalError(w, r, "authentication unavailable", e)
 		}
 		return
 	}
@@ -177,7 +187,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 func (s *Server) session(w http.ResponseWriter, r *http.Request, u store.User, status int) {
 	token := hex.EncodeToString(vault.Random(32))
 	if e := s.db.CreateSession(r.Context(), digest(token), u.Login, time.Now().Add(24*time.Hour)); e != nil {
-		fail(w, 500, "session creation failed")
+		s.internalError(w, r, "session creation failed", e)
 		return
 	}
 	write(w, status, model.Session{Token: token, Login: u.Login, Salt: u.Salt, KeyCheck: u.KeyCheck})
@@ -200,7 +210,7 @@ func (s *Server) auth(next authenticated) http.HandlerFunc {
 			if errors.Is(e, model.ErrNotFound) {
 				fail(w, 401, "session expired or revoked")
 			} else {
-				fail(w, 500, "authentication unavailable")
+				s.internalError(w, r, "authentication unavailable", e)
 			}
 			return
 		}
@@ -209,15 +219,25 @@ func (s *Server) auth(next authenticated) http.HandlerFunc {
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, login, hash string) {
 	if e := s.db.DeleteSession(r.Context(), hash); e != nil {
-		fail(w, 500, "logout failed")
+		s.internalError(w, r, "logout failed", e)
 		return
 	}
 	write(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) list(w http.ResponseWriter, r *http.Request, login, hash string) {
-	items, e := s.db.List(r.Context(), login)
+	var items []model.Record
+	var e error
+	if labels, filtered := r.URL.Query()["label"]; filtered {
+		if len(labels) != 1 || model.ValidateLabels(labels) != nil {
+			fail(w, 400, "one valid public label required")
+			return
+		}
+		items, e = s.db.ListByLabel(r.Context(), login, labels[0])
+	} else {
+		items, e = s.db.List(r.Context(), login)
+	}
 	if e != nil {
-		fail(w, 500, "snapshot unavailable")
+		s.internalError(w, r, "snapshot unavailable", e)
 		return
 	}
 	write(w, 200, items)
@@ -239,7 +259,7 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, login, hash strin
 		case errors.Is(e, model.ErrLimit):
 			fail(w, 422, "account record limit reached")
 		default:
-			fail(w, 500, "write failed")
+			s.internalError(w, r, "write failed", e)
 		}
 		return
 	}

@@ -48,8 +48,16 @@ func NewRemote(address string, allowHTTP bool, caPEM []byte) (*Remote, error) {
 	if len(caPEM) > 0 && !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("invalid CA certificate")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
+	}
 	return &Remote{URL: strings.TrimRight(address, "/"), HTTP: &http.Client{Timeout: 30 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects refused") }}}, nil
 }
 
@@ -146,4 +154,19 @@ func (r *Remote) Apply(ctx context.Context, m model.Mutation) (model.Record, err
 	var v model.Record
 	e := r.call(ctx, "POST", "/v1/records", m, &v)
 	return v, e
+}
+
+// ListByLabel downloads a filtered result, never a full snapshot for cache replacement.
+func (r *Remote) ListByLabel(ctx context.Context, label string) ([]model.Record, error) {
+	if e := model.ValidateLabels([]string{label}); e != nil {
+		return nil, e
+	}
+	var records []model.Record
+	if e := r.call(ctx, "GET", "/v1/records?label="+url.QueryEscape(label), nil, &records); e != nil {
+		return nil, e
+	}
+	if _, e := validateSnapshot(records); e != nil {
+		return nil, e
+	}
+	return records, nil
 }

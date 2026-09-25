@@ -25,5 +25,6 @@ type Store interface {
 	Session(context.Context, string, time.Time) (string, error)
 	DeleteSession(context.Context, string) error
 	List(context.Context, string) ([]model.Record, error)
+	ListByLabel(context.Context, string, string) ([]model.Record, error)
 	Apply(context.Context, string, model.Mutation) (model.Record, error)
 }

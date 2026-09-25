@@ -1,18 +1,21 @@
 CREATE TABLE IF NOT EXISTS users (
- login TEXT PRIMARY KEY, password_hash BYTEA NOT NULL,
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ login VARCHAR(64) NOT NULL UNIQUE, password_hash BYTEA NOT NULL,
  salt BYTEA NOT NULL CHECK(octet_length(salt)=16), key_check BYTEA NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
- token_hash TEXT PRIMARY KEY, login TEXT NOT NULL REFERENCES users(login), expires_at TIMESTAMPTZ NOT NULL
+ token_hash VARCHAR(64) PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id), expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS records (
- login TEXT NOT NULL REFERENCES users(login), id TEXT NOT NULL,
+ user_id BIGINT NOT NULL REFERENCES users(id), id VARCHAR(32) NOT NULL,
  revision BIGINT NOT NULL CHECK(revision>0), deleted BOOLEAN NOT NULL, data BYTEA,
- PRIMARY KEY(login,id)
+ labels VARCHAR(64)[] NOT NULL DEFAULT '{}' CHECK(cardinality(labels)<=16),
+ PRIMARY KEY(user_id,id)
 );
 CREATE TABLE IF NOT EXISTS operations (
- login TEXT NOT NULL REFERENCES users(login), id TEXT NOT NULL,
+ user_id BIGINT NOT NULL REFERENCES users(id), id VARCHAR(32) NOT NULL,
  request_hash BYTEA NOT NULL, result JSONB NOT NULL,
- PRIMARY KEY(login,id)
+ PRIMARY KEY(user_id,id)
 );
+CREATE INDEX IF NOT EXISTS records_labels ON records USING GIN(labels);

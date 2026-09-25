@@ -4,6 +4,8 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -110,6 +112,7 @@ func (d *DB) List(_ context.Context, login string) ([]model.Record, error) {
 	for _, r := range d.records[login] {
 		result = append(result, r)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
 
@@ -152,4 +155,22 @@ func (d *DB) Apply(_ context.Context, login string, m model.Mutation) (model.Rec
 	d.records[login][r.ID] = r
 	d.ops[op] = operation{string(b), r}
 	return r, nil
+}
+
+// ListByLabel returns live records matching an exact public label, ordered by ID.
+func (d *DB) ListByLabel(ctx context.Context, login, label string) ([]model.Record, error) {
+	if err := model.ValidateLabels([]string{label}); err != nil {
+		return nil, err
+	}
+	records, err := d.List(ctx, login)
+	if err != nil {
+		return nil, err
+	}
+	filtered := []model.Record{}
+	for _, r := range records {
+		if !r.Deleted && slices.Contains(r.Labels, label) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered, nil
 }

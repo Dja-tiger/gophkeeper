@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -69,7 +70,12 @@ func Run(ctx context.Context, args []string, getenv func(string) string, out io.
 		return e
 	}
 	defer listener.Close()
-	server := &http.Server{Handler: api.New(db), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: certificates}}
+	logger := slog.New(slog.NewJSONHandler(out, nil))
+	maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan struct{})
+	go func() { defer close(maintenanceDone); cleanSessions(maintenanceCtx, db, logger, 5*time.Minute) }()
+	defer func() { stopMaintenance(); <-maintenanceDone }()
+	server := &http.Server{Handler: api.New(db, logger), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: certificates}}
 	if !*dev {
 		listener = tls.NewListener(listener, server.TLSConfig)
 	}
@@ -90,5 +96,30 @@ func Run(ctx context.Context, args []string, getenv func(string) string, out io.
 			_ = server.Close()
 		}
 		return e
+	}
+}
+
+type sessionCleaner interface {
+	DeleteExpiredSessions(context.Context, time.Time) error
+}
+
+func cleanSessions(ctx context.Context, db sessionCleaner, logger *slog.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := db.DeleteExpiredSessions(cleanup, time.Now())
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			logger.ErrorContext(ctx, "expired session cleanup failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }

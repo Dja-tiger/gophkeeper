@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestWorkflow(t *testing.T) {
-	server := httptest.NewServer(api.New(testutil.NewDB()))
+	server := httptest.NewServer(api.New(testutil.NewDB(), slog.Default()))
 	defer server.Close()
 	dir := t.TempDir()
 	cache := filepath.Join(dir, "cache.json")

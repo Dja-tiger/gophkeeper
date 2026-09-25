@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +21,7 @@ import (
 
 func setup(t *testing.T) (*Remote, *Cache, []byte) {
 	t.Helper()
-	server := httptest.NewTLSServer(api.New(testutil.NewDB()))
+	server := httptest.NewTLSServer(api.New(testutil.NewDB(), slog.Default()))
 	t.Cleanup(server.Close)
 	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
 	r, e := NewRemote(server.URL, false, ca)

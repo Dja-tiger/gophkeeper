@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -29,14 +30,16 @@ Auth: --server https://host:8443 --login NAME --auth-password-file FILE --vault-
       Passwords are prompted without echo when files are omitted. Minimum 12 bytes.
 Records: --input JSON_FILE --id ID --file BINARY_FILE --output NEW_FILE --offline
          add/edit accept a full Secret JSON object; binary contents can come from --file.
+Public labels: add/edit --labels work,personal (visible to server); list --label work
 Conflict: resolve --id ID --keep local|remote, then sync.
 --offline uses the encrypted local cache (add/edit/get/list/delete/status only).
-Online reads synchronize first; writes use the cached revision and synchronize after saving.
+Unfiltered reads synchronize first; writes use the cached revision and synchronize after saving.
+list --label reads matching server records only; --offline filters the local cache.
 `
 
 type options struct {
-	cache, server, login, authFile, vaultFile, input, id, file, output, keep, ca string
-	offline, dev                                                                 bool
+	cache, server, login, authFile, vaultFile, input, id, file, output, keep, ca, labels, label string
+	offline, dev                                                                                bool
 }
 
 // Run executes one CLI invocation. It returns errors to the caller and never prints secrets accidentally.
@@ -73,6 +76,8 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	f.StringVar(&o.id, "id", "", "record ID")
 	f.StringVar(&o.file, "file", "", "binary input path")
 	f.StringVar(&o.output, "output", "", "new binary output path")
+	f.StringVar(&o.labels, "labels", "", "public labels separated by commas; empty clears labels")
+	f.StringVar(&o.label, "label", "", "filter list by one exact public label")
 	f.StringVar(&o.keep, "keep", "", "local or remote")
 	f.BoolVar(&o.offline, "offline", false, "use cache only")
 	f.BoolVar(&o.dev, "dev-http", false, "allow loopback HTTP")
@@ -81,6 +86,21 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	labelsProvided, labelProvided := false, false
+	f.Visit(func(f *flag.Flag) {
+		if f.Name == "labels" {
+			labelsProvided = true
+		}
+		if f.Name == "label" {
+			labelProvided = true
+		}
+	})
+	if labelsProvided && command != "add" && command != "edit" {
+		return errors.New("--labels is only supported for add/edit")
+	}
+	if labelProvided && (command != "list" || model.ValidateLabels([]string{o.label}) != nil) {
+		return errors.New("--label requires list and one valid public label")
 	}
 	if o.offline {
 		switch command {
@@ -165,7 +185,18 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	}
 	// Preserve the revision the user read when staging edits; a newer server
 	// revision must produce a conflict instead of silently replacing remote work.
-	if !o.offline && (command == "get" || command == "list") {
+	if command == "list" && o.label != "" && !o.offline {
+		records, err := r.ListByLabel(ctx, o.label)
+		if err != nil {
+			return err
+		}
+		result := client.NewCache(c.Server, c.Session)
+		for _, record := range records {
+			result.Records[record.ID] = record
+		}
+		c = result // Filtered results are displayed only, never saved over the full cache.
+	}
+	if !o.offline && (command == "get" || command == "list" && o.label == "") {
 		if e = syncSave(); e != nil {
 			return e
 		}
@@ -174,7 +205,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	case "list":
 		ids := make([]string, 0, len(c.Records))
 		for id, v := range c.Records {
-			if !v.Deleted {
+			if !v.Deleted && (o.label == "" || slices.Contains(v.Labels, o.label)) {
 				ids = append(ids, id)
 			}
 		}
@@ -184,7 +215,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			if e != nil {
 				return e
 			}
-			if e = json.NewEncoder(out).Encode(map[string]string{"id": id, "type": s.Type, "title": s.Title, "metadata": s.Metadata}); e != nil {
+			if e = json.NewEncoder(out).Encode(map[string]any{"id": id, "type": s.Type, "title": s.Title, "metadata": s.Metadata, "labels": c.Records[id].Labels}); e != nil {
 				return e
 			}
 		}
@@ -234,7 +265,16 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		if command == "add" && o.id != "" {
 			return errors.New("add generates its own ID")
 		}
-		id, e := c.Put(key, o.id, s)
+		var id string
+		if labelsProvided {
+			var labels []string
+			if o.labels != "" {
+				labels = strings.Split(o.labels, ",")
+			}
+			id, e = c.PutWithLabels(key, o.id, s, labels)
+		} else {
+			id, e = c.Put(key, o.id, s)
+		}
 		if e != nil {
 			return e
 		}

@@ -76,7 +76,16 @@ paths:
           $ref: '#/components/responses/Error'
   /v1/records:
     get:
-      summary: Get the complete current owner's snapshot, including tombstones
+      summary: Get the owner snapshot or filter live records by a public label
+      parameters:
+        - name: label
+          in: query
+          required: false
+          description: Exact public label (1–64 UTF-8 bytes). Filtered results must not replace a full sync cache.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
       responses:
         '200':
           description: Records ordered by ID, at most 1000 including tombstones
@@ -87,6 +96,8 @@ paths:
                 maxItems: 1000
                 items:
                   $ref: '#/components/schemas/Record'
+        '400':
+          $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Error'
         '500':
@@ -201,6 +212,15 @@ components:
           description: 0 in a mutation, positive in a server response
         deleted:
           type: boolean
+        labels:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          description: Optional public tags visible to the server; never put secret metadata here. Absent for tombstones.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
         data:
           type: string
           format: byte

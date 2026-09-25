@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,7 +45,7 @@ func register(t *testing.T, h http.Handler, login string) model.Session {
 }
 func TestUserIsolationAndSessions(t *testing.T) {
 	db := testutil.NewDB()
-	h := New(db)
+	h := New(db, slog.Default())
 	a := register(t, h, "alice")
 	b := register(t, h, "bob")
 	m := model.Mutation{Operation: vault.ID(), Record: model.Record{ID: vault.ID(), Data: make([]byte, 40)}}
@@ -92,7 +93,7 @@ func TestUserIsolationAndSessions(t *testing.T) {
 	}
 }
 func TestMalformedRequests(t *testing.T) {
-	h := New(testutil.NewDB())
+	h := New(testutil.NewDB(), slog.Default())
 	s := register(t, h, "alice")
 	cases := []struct {
 		method, path, body, content, auth string
@@ -118,7 +119,7 @@ func TestMalformedRequests(t *testing.T) {
 }
 func TestStorageFailureAndLimits(t *testing.T) {
 	db := testutil.NewDB()
-	h := New(db)
+	h := New(db, slog.Default())
 	s := register(t, h, "alice")
 	db.Err = errors.New("database password must not leak")
 	for _, c := range []struct {
