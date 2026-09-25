@@ -1,0 +1,7 @@
+/bin/
+/coverage*
+/.env
+/*.pem
+*.test
+*.prof
+.DS_Store
