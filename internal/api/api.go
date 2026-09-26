@@ -64,9 +64,9 @@ func write(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, status int, message string) {
 	write(w, status, map[string]string{"error": message})
 }
-func (s *Server) internalError(w http.ResponseWriter, r *http.Request, message string, err error) {
-	s.logger.ErrorContext(r.Context(), message, "method", r.Method, "path", r.URL.Path, "error", err)
-	fail(w, http.StatusInternalServerError, message)
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, logMessage, clientMessage string, err error) {
+	s.logger.ErrorContext(r.Context(), logMessage, "method", r.Method, "path", r.URL.Path, "error", err)
+	fail(w, http.StatusInternalServerError, clientMessage)
 }
 func decode(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	if strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/json" {
@@ -135,7 +135,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	defer func() { <-s.authSlots }()
 	hash, e := bcrypt.GenerateFromPassword([]byte(c.Password), bcrypt.DefaultCost)
 	if e != nil {
-		s.internalError(w, r, "authentication failed", e)
+		s.internalError(w, r, "authentication failed", http.StatusText(http.StatusInternalServerError), e)
 		return
 	}
 	u := store.User{Login: c.Login, Hash: hash, Salt: c.Salt, KeyCheck: c.KeyCheck}
@@ -143,7 +143,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, model.ErrExists) {
 			fail(w, 409, "login already registered")
 		} else {
-			s.internalError(w, r, "registration failed", e)
+			s.internalError(w, r, "registration failed", http.StatusText(http.StatusInternalServerError), e)
 		}
 		return
 	}
@@ -174,7 +174,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, model.ErrNotFound) {
 			fail(w, 401, "invalid credentials")
 		} else {
-			s.internalError(w, r, "authentication unavailable", e)
+			s.internalError(w, r, "authentication unavailable", http.StatusText(http.StatusInternalServerError), e)
 		}
 		return
 	}
@@ -187,7 +187,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 func (s *Server) session(w http.ResponseWriter, r *http.Request, u store.User, status int) {
 	token := hex.EncodeToString(vault.Random(32))
 	if e := s.db.CreateSession(r.Context(), digest(token), u.Login, time.Now().Add(24*time.Hour)); e != nil {
-		s.internalError(w, r, "session creation failed", e)
+		s.internalError(w, r, "session creation failed", http.StatusText(http.StatusInternalServerError), e)
 		return
 	}
 	write(w, status, model.Session{Token: token, Login: u.Login, Salt: u.Salt, KeyCheck: u.KeyCheck})
@@ -210,7 +210,7 @@ func (s *Server) auth(next authenticated) http.HandlerFunc {
 			if errors.Is(e, model.ErrNotFound) {
 				fail(w, 401, "session expired or revoked")
 			} else {
-				s.internalError(w, r, "authentication unavailable", e)
+				s.internalError(w, r, "authentication unavailable", http.StatusText(http.StatusInternalServerError), e)
 			}
 			return
 		}
@@ -219,7 +219,7 @@ func (s *Server) auth(next authenticated) http.HandlerFunc {
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, login, hash string) {
 	if e := s.db.DeleteSession(r.Context(), hash); e != nil {
-		s.internalError(w, r, "logout failed", e)
+		s.internalError(w, r, "logout failed", http.StatusText(http.StatusInternalServerError), e)
 		return
 	}
 	write(w, 200, map[string]bool{"ok": true})
@@ -237,7 +237,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, login, hash string
 		items, e = s.db.List(r.Context(), login)
 	}
 	if e != nil {
-		s.internalError(w, r, "snapshot unavailable", e)
+		s.internalError(w, r, "snapshot unavailable", http.StatusText(http.StatusInternalServerError), e)
 		return
 	}
 	write(w, 200, items)
@@ -259,7 +259,7 @@ func (s *Server) apply(w http.ResponseWriter, r *http.Request, login, hash strin
 		case errors.Is(e, model.ErrLimit):
 			fail(w, 422, "account record limit reached")
 		default:
-			s.internalError(w, r, "write failed", e)
+			s.internalError(w, r, "write failed", http.StatusText(http.StatusInternalServerError), e)
 		}
 		return
 	}

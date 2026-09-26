@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,12 @@ func (s failingStore) List(ctx context.Context, login string) ([]model.Record, e
 	}
 	return s.Store.List(ctx, login)
 }
+func (s failingStore) ListByLabel(ctx context.Context, login, label string) ([]model.Record, error) {
+	if s.operation == "list-by-label" {
+		return nil, s.err
+	}
+	return s.Store.ListByLabel(ctx, login, label)
+}
 func (s failingStore) Apply(ctx context.Context, login string, m model.Mutation) (model.Record, error) {
 	if s.operation == "apply" {
 		return model.Record{}, s.err
@@ -71,16 +79,17 @@ func TestInternalErrorsAreLoggedWithoutRequestSecrets(t *testing.T) {
 	session := register(t, New(db, slog.New(slog.NewTextHandler(io.Discard, nil))), "alice")
 	failure := errors.New("storage failure trace")
 	for _, tc := range []struct {
-		operation, method, path string
-		body                    any
+		operation, method, path, logMessage string
+		body                                any
 	}{
-		{"create-user", "POST", "/v1/register", credentials("other")},
-		{"user", "POST", "/v1/login", credentials("alice")},
-		{"create-session", "POST", "/v1/login", credentials("alice")},
-		{"session", "GET", "/v1/records", nil},
-		{"delete-session", "POST", "/v1/logout", nil},
-		{"list", "GET", "/v1/records", nil},
-		{"apply", "POST", "/v1/records", model.Mutation{Operation: vault.ID(), Record: model.Record{ID: vault.ID(), Data: bytes.Repeat([]byte("private-record"), 3)}}},
+		{"create-user", "POST", "/v1/register", "registration failed", credentials("other")},
+		{"user", "POST", "/v1/login", "authentication unavailable", credentials("alice")},
+		{"create-session", "POST", "/v1/login", "session creation failed", credentials("alice")},
+		{"session", "GET", "/v1/records", "authentication unavailable", nil},
+		{"delete-session", "POST", "/v1/logout", "logout failed", nil},
+		{"list", "GET", "/v1/records", "snapshot unavailable", nil},
+		{"list-by-label", "GET", "/v1/records?label=work", "snapshot unavailable", nil},
+		{"apply", "POST", "/v1/records", "write failed", model.Mutation{Operation: vault.ID(), Record: model.Record{ID: vault.ID(), Data: bytes.Repeat([]byte("private-record"), 3)}}},
 	} {
 		t.Run(tc.operation, func(t *testing.T) {
 			var logs bytes.Buffer
@@ -89,11 +98,22 @@ func TestInternalErrorsAreLoggedWithoutRequestSecrets(t *testing.T) {
 			if response.Code != 500 || strings.Contains(response.Body.String(), failure.Error()) {
 				t.Fatal("internal error exposed or not returned", response.Code)
 			}
+			var body map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if len(body) != 1 || body["error"] != http.StatusText(http.StatusInternalServerError) {
+				t.Fatalf("expected generic error response, got %s", response.Body.String())
+			}
+			requestURL, err := url.ParseRequestURI(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var entry map[string]any
 			if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
 				t.Fatal(err)
 			}
-			if entry["level"] != "ERROR" || entry["error"] != failure.Error() || entry["path"] != tc.path {
+			if entry["level"] != "ERROR" || entry["error"] != failure.Error() || entry["path"] != requestURL.Path || entry["method"] != tc.method || entry["msg"] != tc.logMessage {
 				t.Fatal("missing error context", entry)
 			}
 			for _, secret := range []string{session.Token, credentials("alice").Password, "private-record"} {
